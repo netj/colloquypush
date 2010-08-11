@@ -138,6 +138,7 @@ public:
 		sRet.Replace("\f", "\\f");
 		sRet.Replace("\"", "\\\"");
 
+                /* XXX assuming sStr was in utf-8 encoding
 		set<char> ssBadChars; // hack so we don't have to mess around with modifying the string while iterating through it
 
 		for (CString::iterator it = sRet.begin(); it != sRet.end(); it++) {
@@ -149,6 +150,7 @@ public:
 		for (set<char>::iterator b = ssBadChars.begin(); b != ssBadChars.end(); b++) {
 			sRet.Replace(CString(*b), ToHex(*b));
 		}
+                */
 
 		return sRet;
 	}
