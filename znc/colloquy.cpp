@@ -6,13 +6,18 @@
  * by the Free Software Foundation.
  */
 
-#include "znc.h"
-#include "Chan.h"
-#include "User.h"
-#include "Modules.h"
+#include <znc/znc.h>
+#include <znc/IRCNetwork.h>
+#include <znc/Chan.h>
+#include <znc/User.h>
+#include <znc/Modules.h>
 #include <time.h>
 
-#define REQUIRESSL		1
+#define REQUIRESSL 1
+
+using std::set;
+using std::map;
+using std::vector;
 
 class CDevice {
 public:
@@ -285,12 +290,21 @@ protected:
 	int m_debug;
 	int m_nightHoursStart;
 	int m_nightHoursEnd;
+	bool m_bAttachedPush;
+	bool m_bSkipMessageContent;
+	bool m_bAwayOnlyPush;
+	bool m_bIgnoreNetworkServices;
 public:
 	MODCONSTRUCTOR(CColloquyMod) {
 		// init vars
 		m_bAttachedPush = true;
-                m_bSkipMessageContent = false;
+		m_bSkipMessageContent = false;
 		m_bAwayOnlyPush = false;
+		m_bIgnoreNetworkServices = false;
+		m_idleAfterMinutes=0;
+		m_nightHoursStart=-1;
+		m_nightHoursEnd=-1;
+		m_debug=0;
 
 		LoadRegistry();
 
@@ -316,36 +330,40 @@ public:
 	virtual bool OnLoad(const CString& sArgs, CString& sErrorMsg) {
 		SCString sArgSet;
 
-		sArgs.Split("-",sArgSet);
-
-		for ( SCString::iterator it = sArgSet.begin(); it != sArgSet.end(); it++ ) {
-			CString sArg(*it);
-			sArg.Trim();
-			if ( sArg.TrimPrefix("attachedpush") ) {
-				m_bAttachedPush = sArg.ToBool();
-			} else if ( sArg.TrimPrefix("skipmessagecontent") ) {
-                                m_bSkipMessageContent = sArg.ToBool();
-			} else if ( sArg.TrimPrefix("awayonlypush") ) {
-				m_bAwayOnlyPush = sArg.ToBool();
-			}
-		}
-
 		//Loading stored stuff
-		m_idleAfterMinutes=0;
-		m_debug=0;
-		m_nightHoursStart=-1;
-		m_nightHoursEnd=-1;
 		for(MCString::iterator it = BeginNV(); it != EndNV(); it++)
 		{
-			if(it->first == "u:idle")
-			{
+			if(it->first == "u:idle") {
 				m_idleAfterMinutes = it->second.ToInt();
+			} else if (it->first == "u:attachedpush") {
+				m_bAttachedPush = it->second.ToBool();
+			} else if (it->first == "u:skipmessagecontent") {
+				m_bSkipMessageContent = it->second.ToBool();
+			} else if (it->first == "u:awayonlypush") {
+				m_bAwayOnlyPush = it->second.ToBool();
+			} else if (it->first == "u:ignorenetworkservices") {
+				m_bIgnoreNetworkServices = it->second.ToBool();
 			} else if (it->first == "u:nighthoursstart") {
 				m_nightHoursStart = it->second.ToInt();
 			} else if (it->first == "u:nighthoursend") {
 				m_nightHoursEnd = it->second.ToInt();
 			} else if (it->first == "u:debug") {
 				m_debug = it->second.ToInt();
+			}
+		}
+
+		sArgs.Split("-",sArgSet);
+		for ( SCString::iterator it = sArgSet.begin(); it != sArgSet.end(); it++ ) {
+			CString sArg(*it);
+			sArg.Trim();
+			if ( sArg.TrimPrefix("attachedpush") ) {
+				m_bAttachedPush = sArg.ToBool();
+			} else if ( sArg.TrimPrefix("skipmessagecontent") ) {
+				m_bSkipMessageContent = sArg.ToBool();
+			} else if ( sArg.TrimPrefix("awayonlypush") ) {
+				m_bAwayOnlyPush = sArg.ToBool();
+			} else if ( sArg.TrimPrefix("ignorenetworkservices") ) {
+				m_bIgnoreNetworkServices = sArg.ToBool();
 			}
 		}
 
@@ -370,7 +388,7 @@ public:
 			CString sNicks = sLine.Token(1, true);
 			if(sNicks[0] == ':')
 				sNicks.LeftChomp();
-			PutUser(":" + m_pUser->GetIRCServer() + " 303 " + m_pUser->GetIRCNick().GetNick() + " :" + sNicks);
+			PutUser(":" + GetNetwork()->GetIRCServer() + " 303 " + GetNetwork()->GetIRCNick().GetNick() + " :" + sNicks);
 
 			return HALTCORE;
 		}
@@ -516,20 +534,28 @@ public:
 
 	virtual void OnModCommand(const CString& sCommand) {
 		if (sCommand.Equals("HELP")) {
-			PutModule("Commands: HELP, LIST");
+			PutModule("Commands: HELP, LIST, SET <option>");
 			PutModule("Command: LIST");
-			PutModule("List devices that receive notifications.");
+			PutModule("  List devices that receive notifications.");
 			PutModule("Command: STATUS");
-			PutModule("Shows the active settings.");
+			PutModule("  Shows the active settings.");
+			PutModule("Command: SET awayonlypush 0|1");
+			PutModule("  If enabled, send notifications only if away.");
+			PutModule("Command: SET attachedpush 0|1");
+			PutModule("  If enabled, push notifications will be sent even if a client is connected.");
+			PutModule("Command: SET skipmessagecontent 0|1");
+			PutModule("  If enabled, znc won't push the content of the message.");
 			PutModule("Command: SET idle <minutes>");
-			PutModule("Only send notifications to colloquy if you have been idle for at least <minutes> or no client is connected to ZNC.");
+			PutModule("  If attachedpush is enabled, wait for 'idle' minutes before pushing messages.");
 			PutModule("Command: SET nighthours <start> <end>");
-			PutModule("Don't send notifications after nighthours start and before nighthours end");
+			PutModule("  Don't send notifications after nighthours start and before nighthours end.");
+			PutModule("Command: SET ignorenetworkservices 0|1");
+			PutModule("  Enable this to stop receiving notifications from IRC services.");
 		} else if (sCommand.Equals("LIST")) {
 			if (m_mspDevices.empty()) {
 				PutModule("You have no saved devices...");
 				PutModule("Connect to znc using your mobile colloquy client...");
-			   	PutModule("Make sure to enable push if it isn't already!");
+				PutModule("Make sure to enable push if it isn't already!");
 			} else {
 				CTable Table;
 				Table.AddColumn("Phone");
@@ -575,14 +601,26 @@ public:
 			const CString sKey = sCommand.Token(1).AsLower();
 			if (sKey == "idle") {
 				m_idleAfterMinutes=sCommand.Token(2).ToInt();
-				PutModule("Idle time set to '"+CString(m_idleAfterMinutes)+"'");
+				PutModule("Idle time: '"+CString(m_idleAfterMinutes)+"'");
+			} else if ( sKey == "awayonlypush" ) {
+				m_bAwayOnlyPush=sCommand.Token(2).ToBool();
+				PutModule("Push only if away: '"+CString(m_bAwayOnlyPush)+"'");
+			} else if ( sKey == "attachedpush" ) {
+				m_bAttachedPush=sCommand.Token(2).ToBool();
+				PutModule("Push even if clients are attached: '"+CString(m_bAttachedPush)+"'");
+			} else if ( sKey == "ignorenetworkservices" ) {
+				m_bIgnoreNetworkServices=sCommand.Token(2).ToBool();
+				PutModule("Ignore network services: '"+CString(m_bIgnoreNetworkServices)+"'");
 			} else if (sKey == "debug") {
 				m_debug=sCommand.Token(2).ToInt();
-				PutModule("Debug set to '"+CString(m_debug)+"'");
+				PutModule("Debug: '"+CString(m_debug)+"'");
 			} else if (sKey == "nighthours") {
 				m_nightHoursStart=hoursToInt(sCommand.Token(2));
 				m_nightHoursEnd=hoursToInt(sCommand.Token(3));
-				PutModule("Night Hours set to "+intToHours(m_nightHoursStart)+" - "+intToHours(m_nightHoursEnd));
+				PutModule("Night Hours: "+intToHours(m_nightHoursStart)+" - "+intToHours(m_nightHoursEnd));
+			}	else if ( sKey == "skipmessagecontent" ) {
+				m_bSkipMessageContent=sCommand.Token(2).ToBool();
+				PutModule("Skip Message Content: '"+CString(m_bSkipMessageContent)+"'");
 			} else {
 				PutModule("Unknown setting. Try HELP.");
 			}
@@ -590,13 +628,51 @@ public:
 			//Save stored stuff
 			//ClearNV(); //Dangerous, NV holds devices
 			SetNV("u:idle", CString(m_idleAfterMinutes), false);
+			SetNV("u:awayonlypush", CString(m_bAwayOnlyPush), false);
+			SetNV("u:attachedpush", CString(m_bAttachedPush), false);
+			SetNV("u:skipmessagecontent", CString(m_bSkipMessageContent), false);
+			SetNV("u:ignorenetworkservices", CString(m_bIgnoreNetworkServices), false);
 			SetNV("u:debug", CString(m_debug), false);
 			SetNV("u:nighthoursstart", CString(m_nightHoursStart), false);
 			SetNV("u:nighthoursend", CString(m_nightHoursEnd), false);
 		} else if (sCommand.Token(0).Equals("STATUS")) {
-			PutModule("Current Status:");
-			PutModule("Idle after minutes: "+CString(m_idleAfterMinutes));
-			PutModule("Night Hours: "+intToHours(m_nightHoursStart)+" - "+intToHours(m_nightHoursEnd));
+			CTable Table;
+			Table.AddColumn("Option");
+			Table.AddColumn("Value");
+
+			Table.AddRow();
+			Table.SetCell("Option","Push only if away");
+			Table.SetCell("Value",CString(m_bAwayOnlyPush));
+
+			Table.AddRow();
+			Table.SetCell("Option","Push even if clients are attached");
+			Table.SetCell("Value",CString(m_bAttachedPush));
+
+			Table.AddRow();
+			Table.SetCell("Option","Skip Message Content");
+			Table.SetCell("Value",CString(m_bSkipMessageContent));
+
+			Table.AddRow();
+			Table.SetCell("Option","- only if idle for");
+			if ( m_idleAfterMinutes > 0 )
+				Table.SetCell("Value",CString(m_idleAfterMinutes) + " minutes");
+			else
+				Table.SetCell("Value","Always");
+
+			Table.AddRow();
+			Table.SetCell("Option","");
+			Table.SetCell("Value","");
+
+			Table.AddRow();
+			Table.SetCell("Option","Night Hours (no push)");
+			Table.SetCell("Value",intToHours(m_nightHoursStart)+" - "+intToHours(m_nightHoursEnd));
+
+			Table.AddRow();
+			Table.SetCell("Option","Ignore network services");
+			Table.SetCell("Value",CString(m_bIgnoreNetworkServices));
+
+			PutModule("  Current Status");
+			PutModule(Table);
 		/*
 		} else if (sCommand.Token(0).Equals("REMKEYWORD")) {
 			CString sKeyword(sCommand.Token(1, true));
@@ -654,7 +730,13 @@ public:
 
 		if (iBadge != 0) {
 			CUser* pUser = GetUser();
-			if (pUser && m_bAwayOnlyPush && !pUser->IsIRCAway()) {
+			if (pUser && m_bAwayOnlyPush && !(GetNetwork()->IsIRCAway())) {
+				return false;
+			}
+		}
+
+		if ( m_bIgnoreNetworkServices ) {
+			if ( sNick.Equals("NickServ") or sNick.Equals("ChanServ") or sNick.Equals("MemoServ") or sNick.Equals("HostServ") ) {
 				return false;
 			}
 		}
@@ -695,7 +777,7 @@ public:
 		}
 
 		bool bRet = true;
-		vector<CClient*>& vpClients = m_pUser->GetClients();
+		vector<CClient*>& vpClients = GetNetwork()->GetClients();
 
 		// Cycle through all of the cached devices
 		for (map<CString, CDevice*>::iterator it = m_mspDevices.begin(); it != m_mspDevices.end(); it++) {
@@ -720,7 +802,7 @@ public:
 			// If it's a highlight, then we need to make sure it matches a highlited word
 			if (bHilite) {
 				// Test our current irc nick
-				const CString& sMyNick(m_pUser->GetIRCNick().GetNick());
+				const CString& sMyNick(GetNetwork()->GetIRCNick().GetNick());
 				bool bMatches = Test(sMyNick, sMessage) || Test(sMyNick + "?*", sMessage);
 
 				// If our nick didn't match, test the list of keywords for this device
@@ -803,8 +885,5 @@ public:
 	}
 private:
 	map<CString, CDevice*>	m_mspDevices;	// map of token to device info for clients who have sent us PUSH info
-	bool	m_bAttachedPush;
-	bool	m_bSkipMessageContent;
-	bool	m_bAwayOnlyPush;
 };
-MODULEDEFS(CColloquyMod, "Push privmsgs and highlights to your iPhone via Colloquy Mobile")
+MODULEDEFS(CColloquyMod, "Push privmsgs and highlights to your iOS device via Colloquy Mobile")
